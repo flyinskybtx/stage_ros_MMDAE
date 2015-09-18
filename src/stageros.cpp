@@ -18,9 +18,7 @@
  */
 
 /**
-
 @mainpage
-
 @htmlinclude manifest.html
 **/
 
@@ -32,7 +30,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <signal.h>
-
 
 // libstage
 #include <stage.hh>
@@ -49,6 +46,11 @@
 #include <geometry_msgs/Twist.h>
 #include <rosgraph_msgs/Clock.h>
 
+#ifdef Bool
+#undef Bool
+#endif
+#include <std_msgs/Bool.h>
+
 #include <std_srvs/Empty.h>
 
 #include "tf/transform_broadcaster.h"
@@ -61,6 +63,7 @@
 #define BASE_SCAN "base_scan"
 #define BASE_POSE_GROUND_TRUTH "base_pose_ground_truth"
 #define CMD_VEL "cmd_vel"
+#define STALL "stall"
 
 // Our node
 class StageNode
@@ -85,10 +88,11 @@ private:
         Stg::ModelPosition* positionmodel; //one position
         std::vector<Stg::ModelCamera *> cameramodels; //multiple cameras per position
         std::vector<Stg::ModelRanger *> lasermodels; //multiple rangers per position
-
+        bool stall;
         //ros publishers
         ros::Publisher odom_pub; //one odom
         ros::Publisher ground_truth_pub; //one ground truth
+        ros::Publisher stall_pub;
 
         std::vector<ros::Publisher> image_pubs; //multiple images
         std::vector<ros::Publisher> depth_pubs; //multiple depths
@@ -103,9 +107,9 @@ private:
     // Used to remember initial poses for soft reset
     std::vector<Stg::Pose> initial_poses;
     ros::ServiceServer reset_srv_;
-  
+
     ros::Publisher clock_pub_;
-    
+
     bool isDepthCanonical;
     bool use_model_names;
 
@@ -123,6 +127,7 @@ private:
 
     // Appends the given robot ID to the given message name.  If omitRobotID
     // is true, an unaltered copy of the name is returned.
+    const char *jamesName(const char *name) const;
     const char *mapName(const char *name, size_t robotID, Stg::Model* mod) const;
     const char *mapName(const char *name, size_t robotID, size_t deviceID, Stg::Model* mod) const;
 
@@ -134,7 +139,7 @@ private:
 
     // Current simulation time
     ros::Time sim_time;
-    
+
     // Last time we saved global position (for velocity calculation).
     ros::Time base_last_globalpos_time;
     // Last published global pose of each robot
@@ -153,7 +158,7 @@ public:
 
     // Our callback
     void WorldCallback();
-    
+
     // Do one update of the world.  May pause if the next update time
     // has not yet arrived.
     bool UpdateWorld();
@@ -193,6 +198,12 @@ StageNode::mapName(const char *name, size_t robotID, Stg::Model* mod) const
     }
     else
         return name;
+}
+
+const char *
+StageNode::jamesName(const char *name) const
+{
+    return name;
 }
 
 const char *
@@ -353,6 +364,7 @@ StageNode::SubscribeModels()
 
         new_robot->odom_pub = n_.advertise<nav_msgs::Odometry>(mapName(ODOM, r, static_cast<Stg::Model*>(new_robot->positionmodel)), 10);
         new_robot->ground_truth_pub = n_.advertise<nav_msgs::Odometry>(mapName(BASE_POSE_GROUND_TRUTH, r, static_cast<Stg::Model*>(new_robot->positionmodel)), 10);
+        new_robot->stall_pub = n_.advertise<std_msgs::Bool>("stall",10,false);
         new_robot->cmdvel_sub = n_.subscribe<geometry_msgs::Twist>(mapName(CMD_VEL, r, static_cast<Stg::Model*>(new_robot->positionmodel)), 10, boost::bind(&StageNode::cmdvelReceived, this, r, _1));
 
         for (size_t s = 0;  s < new_robot->lasermodels.size(); ++s)
@@ -391,7 +403,7 @@ StageNode::SubscribeModels()
 }
 
 StageNode::~StageNode()
-{    
+{
     for (std::vector<StageRobot const*>::iterator r = this->robotmodels_.begin(); r != this->robotmodels_.end(); ++r)
         delete *r;
 }
@@ -502,7 +514,11 @@ StageNode::WorldCallback()
         odom_msg.twist.twist.linear.x = v.x;
         odom_msg.twist.twist.linear.y = v.y;
         odom_msg.twist.twist.angular.z = v.a;
-
+        bool stall_value;
+        stall_value = robotmodel->positionmodel->Stalled();
+        std_msgs::Bool stall_msg;
+        stall_msg.data = stall_value;
+        robotmodel->stall_pub.publish(stall_msg);
         //@todo Publish stall on a separate topic when one becomes available
         //this->odomMsgs[r].stall = this->positionmodels[r]->Stall();
         //
@@ -731,9 +747,9 @@ StageNode::WorldCallback()
     this->clock_pub_.publish(clock_msg);
 }
 
-int 
+int
 main(int argc, char** argv)
-{ 
+{
     if( argc < 2 )
     {
         puts(USAGE);
@@ -764,11 +780,12 @@ main(int argc, char** argv)
 
     // TODO: get rid of this fixed-duration sleep, using some Stage builtin
     // PauseUntilNextUpdate() functionality.
-    ros::WallRate r(10.0);
+    ros::WallRate r(25.0);
     while(ros::ok() && !sn.world->TestQuit())
     {
-        if(gui)
+        if(gui){
             Fl::wait(r.expectedCycleTime().toSec());
+        }
         else
         {
             sn.UpdateWorld();
@@ -779,4 +796,3 @@ main(int argc, char** argv)
 
     exit(0);
 }
-
